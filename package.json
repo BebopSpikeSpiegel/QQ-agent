@@ -49,6 +49,7 @@
   "scripts": {
     "start": "electron .",
     "server": "node src/server.js",
+    "bridge": "node scripts/claude-code-bridge.mjs",
     "setup": "node scripts/setup.mjs",
     "setup:check": "node scripts/setup.mjs --check",
     "setup:napcat": "node scripts/setup-napcat.mjs",
