@@ -168,9 +168,12 @@ function plan(body) {
   }
 
   const effort = EFFORTS.has(String(body.reasoning_effort)) ? String(body.reasoning_effort) : DEFAULT_EFFORT;
+  // 可选：让 Claude Code 在这一轮里自己用 WebSearch / WebFetch（只认这两个，其余一律忽略）
+  const claudeTools = String(body.claude_tools || '').split(/[\s,]+/).filter((t) => ['WebSearch', 'WebFetch'].includes(t)).join(',');
   return {
     model: resolveModel(body.model),
     effort,
+    tools: claudeTools,
     system: (system || 'You are a helpful assistant.') + systemExtra,
     content: buildTranscript(rest),
     schema,
@@ -184,10 +187,11 @@ function runClaude(p, signal) {
   const promptFile = path.join(WORK_DIR, `${id}.system.txt`);
   fs.writeFileSync(promptFile, p.system, 'utf8');
   const args = [
-    '-p', '--safe-mode', '--tools', '', '--strict-mcp-config', '--no-session-persistence', '--disable-slash-commands',
+    '-p', '--safe-mode', '--tools', p.tools || '', '--strict-mcp-config', '--no-session-persistence', '--disable-slash-commands',
     '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
     '--model', p.model, '--system-prompt-file', promptFile
   ];
+  if (p.tools) args.push('--allowedTools', p.tools);
   if (p.effort) args.push('--effort', p.effort);
   if (p.schema) args.push('--json-schema', JSON.stringify(p.schema));
 
@@ -230,6 +234,36 @@ function runClaude(p, signal) {
 
     child.stdin.end(JSON.stringify({ type: 'user', message: { role: 'user', content: p.content } }) + '\n');
   });
+}
+
+/**
+ * 搜索：给程序的「自定义搜索（openai 类型）」用。只开 Claude Code 自带的 WebSearch 一个工具，
+ * 搜索走 Claude 订阅本身，不接任何第三方搜索 API。返回 { results: [{ title, url, snippet }] }。
+ */
+const SEARCH_MODEL = String(ARGS['search-model'] || 'haiku');
+const SEARCH_SCHEMA = {
+  type: 'object',
+  properties: {
+    results: {
+      type: 'array', maxItems: 8,
+      items: { type: 'object', properties: { title: { type: 'string' }, url: { type: 'string' }, snippet: { type: 'string' } }, required: ['title', 'url', 'snippet'] }
+    }
+  },
+  required: ['results']
+};
+function searchPlan(body) {
+  const query = String(body.query ?? body.q ?? '').trim().slice(0, 300);
+  const topK = Math.min(8, Math.max(1, Number(body.top_k ?? body.count) || 6));
+  return {
+    model: SEARCH_MODEL,
+    effort: '',
+    tools: 'WebSearch',
+    system: `用 WebSearch 搜索用户给的关键词（可以换说法多搜一两次），然后通过 StructuredOutput 交出最相关的 ${topK} 条结果。title、url 照搜索结果原样给；snippet 用页面里跟问题相关的原文要点，不要编，不要加你自己的评论。`,
+    content: [{ type: 'text', text: query }],
+    schema: SEARCH_SCHEMA,
+    mode: 'search',
+    query
+  };
 }
 
 function toCompletion(p, r) {
@@ -302,6 +336,29 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && route === '/models') {
     return send(res, 200, { object: 'list', data: MODEL_ALIASES.map((id) => ({ id, object: 'model', owned_by: 'claude-code' })) });
+  }
+  if (req.method === 'POST' && route === '/search') {
+    let body;
+    try { body = await readJson(req); } catch { return send(res, 400, { error: { message: 'invalid JSON body' } }); }
+    const sp = searchPlan(body);
+    if (!sp.query) return send(res, 400, { error: { message: 'query 不能为空' } });
+    const abort = new AbortController();
+    res.on('close', () => { if (!res.writableFinished) abort.abort(); });
+    const started = Date.now();
+    try {
+      const r = await withSlot(() => runClaude(sp, abort.signal));
+      if (r.is_error) {
+        log(`✗ search ${Number(r.api_error_status) || 502} ${String(r.result || r.subtype).slice(0, 200)}`);
+        return send(res, Number(r.api_error_status) || 502, { error: { message: String(r.result || r.subtype || 'claude error') } });
+      }
+      const results = (r.structured_output?.results || []).filter((x) => x?.url);
+      log(`✓ search "${sp.query.slice(0, 40)}" → ${results.length} results ${Date.now() - started}ms`);
+      return send(res, 200, { query: sp.query, results });
+    } catch (error) {
+      if (abort.signal.aborted) return;
+      log(`✗ search ${error.message}`);
+      return send(res, error.status || 500, { error: { message: error.message } });
+    }
   }
   if (req.method !== 'POST' || route !== '/chat/completions') {
     return send(res, 404, { error: { message: `unknown route ${req.method} ${url.pathname}` } });
