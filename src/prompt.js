@@ -139,6 +139,8 @@ function resolveCapabilityFn(name) {
   }
 }
 
+const ROLE_TAGS = { owner: '[群主]', admin: '[管理员]' };
+
 function formatEntry(m, { withId = true } = {}) {
   const senderId = String(m.senderId || '');
   const replyPrefix = !String(m.text || '').startsWith('[引用') && (m.reply?.text || m.reply?.sender)
@@ -160,7 +162,9 @@ function formatEntry(m, { withId = true } = {}) {
     const idSuffix = senderId && String(senderId) !== 'self' ? `(QQ:${senderId})` : '';
     who = m.self ? '我' : `${getConfig().memberNotes?.[senderId] || m.senderName || senderId || '未知'}${idSuffix}`;
   }
-  return `[${formatShortTime(m.ts)}] ${idPrefix}${who}：${replyPrefix}${m.text}`;
+  // 群身份标签：模型要知道谁是群主/管理员（谁能禁言、踢人、改设置），否则只能当所有人平级
+  const roleTag = !m.self && ROLE_TAGS[m.senderRole] ? ROLE_TAGS[m.senderRole] : '';
+  return `[${formatShortTime(m.ts)}] ${idPrefix}${who}${roleTag}：${replyPrefix}${m.text}`;
 }
 
 /**

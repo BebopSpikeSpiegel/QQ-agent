@@ -63,6 +63,13 @@ c.section('1. util.js 工具函数');
     assert.deepEqual(u.normalizeMessageList([]), []);
   });
 
+  await c.check('normalizeMessageList：示例记号" / "拆成多条，正常斜杠不动', () => {
+    assert.deepEqual(u.normalizeMessageList('挑拨成功了 / 我自己骂的'), ['挑拨成功了', '我自己骂的']);
+    assert.deepEqual(u.normalizeMessageList(['a / b', 'c']), ['a', 'b', 'c']);
+    assert.deepEqual(u.normalizeMessageList('bo7/cod21 都玩'), ['bo7/cod21 都玩']);
+    assert.deepEqual(u.normalizeMessageList('https://a.com/b/c'), ['https://a.com/b/c']);
+  });
+
   await c.check('unquoteJsonString：剥掉多余的 JSON 引号', () => {
     assert.equal(u.unquoteJsonString('"hello"'), 'hello');
     assert.equal(u.unquoteJsonString('hello'), 'hello');
@@ -1028,6 +1035,19 @@ c.section('13. prompt.js 提示词组装');
     assert.ok(past && typeof past === 'object', '应返回对象');
     assert.ok(past.text.includes('历史消息一'), '历史状态应包含旧消息');
     assert.ok(past.count >= 2, `应统计到至少 2 条，实际 ${past.count}`);
+  });
+
+  await c.check('buildPastState：群主/管理员带身份标签，普通群员不带', () => {
+    const store = new ChatStore(0);
+    store.appendIncoming('group:1', { mid: 1, ts: Date.now() - 5000, senderId: 'u1', senderName: '群主甲', senderRole: 'owner', text: '我是群主' });
+    store.appendIncoming('group:1', { mid: 2, ts: Date.now() - 4000, senderId: 'u2', senderName: '管理乙', senderRole: 'admin', text: '我是管理' });
+    store.appendIncoming('group:1', { mid: 3, ts: Date.now() - 3000, senderId: 'u3', senderName: '路人丙', senderRole: 'member', text: '我是群员' });
+    store.drainUnread('group:1');
+    const lines = buildPastState(store, 'group:1', { limit: 20 }).text.split('\n');
+    const line = (word) => lines.find((l) => l.includes(word)) || '';
+    assert.ok(line('我是群主').includes('[群主]：'), `群主应带标签：${line('我是群主')}`);
+    assert.ok(line('我是管理').includes('[管理员]：'), `管理员应带标签：${line('我是管理')}`);
+    assert.ok(!/\[群主\]|\[管理员\]/.test(line('我是群员')), `普通群员不应带标签：${line('我是群员')}`);
   });
 
   await c.check('buildPastState：excludeIds 能排除指定消息', () => {

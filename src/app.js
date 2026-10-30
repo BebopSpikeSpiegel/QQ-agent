@@ -19,7 +19,8 @@ import { SessionRegistry } from './sessions.js';
 import { Orchestrator } from './orchestrator.js';
 import { ReminderStore } from './reminders.js';
 import { VideoReader } from './video-reader.js';
-import { cacheHitRate } from './llm.js';
+import { cacheHitRate, chatCompletion } from './llm.js';
+import { detectMime } from './image-type.js';
 import { isPeakHour, priceAt, resolveModelPrice, modelLabel, splitModelLabel, UNKNOWN_VENDOR } from './model-prices.js';
 import { initPriceFeed } from './price-feed.js';
 import { startTelemetryLoop } from './telemetry.js';
@@ -637,6 +638,8 @@ export function createApp({ log = console.log } = {}) {
     onEvent: (event) => handleOneBotEvent(event).catch((error) => log('[ingest] 处理事件出错:', error?.message ?? error))
   });
   const stickers = new StickerManager(onebot);
+  // 模型自己收表情时备注常写成"谁让存的"，收藏时用它看图重写（见 StickerManager.collect）
+  stickers.describe = (buf) => describeStickerBytes(buf);
   const approvals = new ActionApprovals({ onebot, stickers, emit });
   const sender =   new SendQueue({
     onebot, store,
@@ -935,6 +938,7 @@ export function createApp({ log = console.log } = {}) {
       ts: event.time ? Math.round(Number(event.time) * 1000) : Date.now(),
       senderId,
       senderName,
+      senderRole: kind === 'group' ? String(event.sender?.role || '') : '',
       text: text || '[图片]' ,
       reply,
       media,
@@ -948,6 +952,40 @@ export function createApp({ log = console.log } = {}) {
     // 链接媒体转发（确定性）：刻意不 await —— 百兆级下载/上传不能卡住 ingest 热路径。
     // 内部已把错误全部收口（含 provider 抛错），这里再挂一次 catch 只为防漏网。
     forwardLinkedMedia(kind, id, text).catch((e) => log(`[media] 链接转发失败：${e?.message ?? e}`));
+    // 指定群友（config.sticker.autoCollectFrom）发的表情自动进表情库；同样不 await，不卡 ingest
+    autoCollectSticker(kind, entry).catch((e) => log(`[sticker] 自动收藏失败：${e?.message ?? e}`));
+  }
+
+  /** 用模型给表情写一句备注（画面 + 什么时候发），失败返回空串，由调用方兜底。 */
+  async function describeSticker(url) {
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!res.ok) return '';
+    return describeStickerBytes(Buffer.from(await res.arrayBuffer()));
+  }
+
+  async function describeStickerBytes(buf) {
+    const mime = detectMime(buf);
+    if (!/^image\//.test(mime || '')) return '';
+    const r = await chatCompletion({
+      messages: [
+        { role: 'system', content: '你给QQ表情包写备注。只输出一行，不超过18个字：画面是什么，逗号，适合什么时候发。例：猫咪翻白眼，无语时' },
+        { role: 'user', content: [{ type: 'text', text: '这个表情：' }, { type: 'image_url', image_url: { url: `data:${mime};base64,${buf.toString('base64')}` } }] }
+      ],
+      maxTokens: 60
+    });
+    return String(r.message?.content || '').split('\n')[0].trim().slice(0, 20);
+  }
+
+  async function autoCollectSticker(kind, entry) {
+    const from = (getConfig().sticker?.autoCollectFrom || []).map(String);
+    if (kind !== 'group' || !from.includes(String(entry?.senderId)) || entry?.mid == null) return;
+    for (const m of entry.media || []) {
+      if (m.kind !== 'image' || !/表情/.test(String(m.summary || ''))) continue;
+      let note = '';
+      try { note = await describeSticker(m.url); } catch { /* 描述失败照收，备注用兜底 */ }
+      const saved = await stickers.collect(entry.mid, { url: m.url, file: m.file, note: note || `${entry.senderName}常发的表情` });
+      log(`[sticker] 已自动收藏 ${entry.senderName} 的表情：${saved?.desc || saved?.id}`);
+    }
   }
 
   /**

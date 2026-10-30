@@ -85,7 +85,7 @@ export class ChatStore {
   }
 
   /** 追加一条收到的消息（未读）。返回写入的条目。 */
-  appendIncoming(chatKey, { mid, ts, senderId, senderName, text, reply = null, media = [], isPoke = false, atMe = null, atNames = [] }) {
+  appendIncoming(chatKey, { mid, ts, senderId, senderName, senderRole = '', text, reply = null, media = [], isPoke = false, atMe = null, atNames = [] }) {
     const st = this.#state(chatKey);
     const entry = {
       id: st.nextLocalId++,
@@ -93,6 +93,8 @@ export class ChatStore {
       ts: ts || Date.now(),
       senderId: String(senderId ?? ''),
       senderName: String(senderName ?? ''),
+      // 群身份：只存群主/管理员（OneBot sender.role），普通群员留空，免得每条存档都多一个字段
+      senderRole: ['owner', 'admin'].includes(senderRole) ? senderRole : '',
       text: String(text ?? ''),
       self: false,
       read: false,

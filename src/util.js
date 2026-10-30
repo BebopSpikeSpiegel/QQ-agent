@@ -134,8 +134,12 @@ export function normalizeMessageList(input) {
   for (const m of arr) {
     const unwrapped = unwrapMessage(m);
     if (unwrapped === null) { bad.push(m); continue; }
-    const s = String(unwrapped).trim();
-    if (s) out.push(s);
+    // " / " 是提示词示例里"拆成几条发"的记号，模型偶尔会照抄进正文 —— 在这里拆成真正的多条。
+    // 只认两侧带空白的斜杠，"bo7/cod21"、链接、日期这类正常斜杠不受影响。
+    for (const part of String(unwrapped).split(/\s+\/\s+/)) {
+      const s = part.trim();
+      if (s) out.push(s);
+    }
   }
   if (!out.length && bad.length) {
     throw new Error(`messages 必须是字符串或字符串数组，收到的是对象形态：${JSON.stringify(bad[0])?.slice(0, 120)}——请把消息文本直接作为字符串传入`);

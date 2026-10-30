@@ -48,6 +48,12 @@ export function localStickerPath(raw) {
 // （靠"默认返回 .jpg"歪打正着），加新格式时要改三处、极易漏。
 import { detectImageExt } from './image-type.js';
 
+/** 说不出这张图是什么、什么时候用的备注（"谁让存的""群里发的""某某发的图"、太短）。 */
+export function isVagueStickerNote(note) {
+  const s = String(note || '').trim();
+  return [...s].length < 6 || /让存|让收|群里发的|发的图|存的图|收进表情包/.test(s);
+}
+
 export class StickerManager {
   constructor(onebot) {
     this.onebot = onebot;
@@ -221,12 +227,17 @@ export class StickerManager {
     file = String(file || '');
     if (!url && !file) throw new Error('该消息没有可收藏的图片地址');
     const id = `collected_${messageId}`;
-    const noteText = String(note || '');
+    let noteText = String(note || '');
     const existing = this.entries.find((e) => e.id === id);
 
     // ① 图片字节：协议端缓存优先（get_image），其次直链下载
     let bytes = null;
     try { bytes = await this.#getImageBytes({ url, file }); } catch { bytes = null; }
+    // 备注是"谁让存的/群里发的"这类空话时，看图重写一句（画面 + 什么时候发）——
+    // 表情是按备注挑的，空话备注等于这张永远用不上。describe 由 app 注入，没注入就原样保留。
+    if (bytes && typeof this.describe === 'function' && isVagueStickerNote(noteText)) {
+      try { const d = await this.describe(bytes); if (d) noteText = d; } catch { /* 描述失败保留原备注 */ }
+    }
     // ② 本地转存（双保险，发送最稳的形态）
     let localFile = '';
     if (bytes) {

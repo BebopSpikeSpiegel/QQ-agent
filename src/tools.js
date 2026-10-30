@@ -6,6 +6,7 @@
 //
 // 重构说明：所有工具通过 registerTool() 注册到 tool-registry.js，
 // 支持在设置页按卡片勾选启用/禁用。
+import fs from 'node:fs';
 import { getConfig } from './config.js';
 import { registerChatFeatureTools } from './chat-feature-tools.js';
 import { assertDeliveryAllowed } from './chat-policy.js';
@@ -32,9 +33,40 @@ function currentGifRoute() {
   return resolveGifRoute({ vision: cfg.api?.vision !== false, video: cfg.api?.video === true });
 }
 
+/** 给一个可能永远不 settle 的 promise 加总时限（requestOnce 的 timeout 只管空闲，慢速流/多跳重定向能拖好几分钟）。 */
+function withDeadline(promise, ms, message) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); })
+  ]).finally(() => clearTimeout(timer));
+}
+
 async function downloadImageAsDataUrl(url, timeoutMs = 30000) {
   const safeUrl = await validateImageUrl(url);
-  const { buffer, contentType } = await safeFetchBinary(safeUrl);
+  const { buffer, contentType } = await withDeadline(safeFetchBinary(safeUrl), timeoutMs, `图片下载超时（${Math.round(timeoutMs / 1000)}s）`);
+  return imageBufferToResult(buffer, contentType);
+}
+
+/**
+ * 表情的本地文件地址：自身是 file:/// 的直接用；QQ 收藏同步来的条目（id = emoji_id）找它的
+ * collected_ 孪生（emojiId 相同）的本地转存。都没有返回 ''。QQ 图床直链在某些网络下会拖死整个会话。
+ */
+function localStickerFileUrl(stickers, sticker) {
+  const own = String(sticker.localFile || sticker.url || '');
+  if (own.startsWith('file:///')) return own;
+  const twin = (stickers?.entries || []).find((e) => e.emojiId && e.emojiId === sticker.id && String(e.localFile || '').startsWith('file:///'));
+  return twin?.localFile || '';
+}
+
+/** 本地已转存的表情直接读盘（受控目录内的 file:///），不走网络。 */
+async function localImageAsDataUrl(fileUrl) {
+  const p = localStickerPath(fileUrl);
+  if (!p || !fs.existsSync(p)) throw new Error('本地表情文件不存在');
+  return imageBufferToResult(fs.readFileSync(p), '');
+}
+
+async function imageBufferToResult(buffer, contentType) {
   if (!buffer || !buffer.length) throw new Error('图片内容为空');
   // GIF 在这里分岔（规则矩阵见 resolveGifRoute）：
   //   vision+video 都开 → 转 mp4 按 video 部件发（llm.js 自动切视频专用模型）；
@@ -290,8 +322,13 @@ function registerAllTools() {
         if (!sticker.url) return err(`表情 ${sticker.id} 没有可发送的图片地址`);
         // 发送前预检：http 直链（QQ 图床 rkey ~1 小时过期）尽量升级成本地转存，
         // 失败则交给 sender 的三级回退链。本地转存过的条目直通。
-        if (typeof ctx.stickers.ensureSendable === 'function') {
-          sticker = await ctx.stickers.ensureSendable(sticker);
+        // 有本地文件（自身或孪生）就直接按本地图片发，不碰 QQ 图床；
+        // 没有才走 ensureSendable 的下载转存，并限时 —— 超时就带着原地址交给 sender 的回退链。
+        const localUrl = localStickerFileUrl(ctx.stickers, sticker);
+        if (localUrl && !String(sticker.url).startsWith('file:///')) {
+          sticker = { ...sticker, url: localUrl };
+        } else if (!localUrl && typeof ctx.stickers.ensureSendable === 'function') {
+          try { sticker = await withDeadline(ctx.stickers.ensureSendable(sticker), 15000, '表情转存超时'); } catch { /* 用原地址 */ }
         }
         // 本地收藏图片（file:/// 路径，收藏时已转存）不走公网 URL 校验，
         // 但必须落在受控的 data/sticker-images/ 目录内 —— 本地库条目若被污染
@@ -365,7 +402,9 @@ function registerAllTools() {
         const sticker = await ctx.stickers.find(args.stickerId);
         if (!sticker) return err(`找不到表情 ${args.stickerId}`);
         if (!sticker.url) return err('该表情没有图片地址');
-        const r = await downloadImageAsDataUrl(sticker.url);
+        // 优先读本地转存，没有才限时下载
+        const localUrl = localStickerFileUrl(ctx.stickers, sticker);
+        const r = localUrl ? await localImageAsDataUrl(localUrl) : await downloadImageAsDataUrl(sticker.url, 20000);
         const built = getImagePartsOrVideo(`表情 ${sticker.id}（备注：${sticker.desc || '无'}）：`, [r]);
         if (r.gifVideo) {
           built.content[0].text += `\n（这是 GIF 动图，已转成 ${r.gifVideo.frames} 帧、最长边 ${Math.max(r.gifVideo.width, r.gifVideo.height) || '≤480'}px 的视频输入，画面按视频发给模型）`;

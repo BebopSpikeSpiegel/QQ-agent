@@ -1919,6 +1919,8 @@ export class Orchestrator {
         `3. 最多 ${maxKeep} 条，每条不超过 120 字，用第一人称视角（"他/她…"）。`,
         '4. 宁少勿错：信息不足就少写，不要脑补。',
         '5. 若实在提炼不出任何稳定特征，输出空数组。',
+        // 印象会原样注入机器人自己的提示词：写成"那个机器人"等于天天提醒它自己是 bot，人设就崩了
+        `6. 这些印象是给"你"（${[getConfig().persona?.botName, this.onebot?.selfNickname].filter(Boolean).join(' / ') || '本账号'}）自己看的：发言里 @ 你、提到你的地方一律写"你"，不要写成"机器人""bot""AI"或你的名字。`,
         '',
         sample.length ? sample.join('\n') : '（没有抓到该群友的发言）'
       ].join('\n')
