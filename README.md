@@ -2,6 +2,30 @@
 ![平台](https://img.shields.io/badge/platform-Windows%20%7C%20Electron-lightgrey)
 ![技术栈](https://img.shields.io/badge/stack-Node.js%20%7C%20原生前端-orange)
 ![测试](https://img.shields.io/badge/tests-24%20suites%20%E2%80%89620%2B%20assertions-brightgreen)
+
+> **这是 [Ksanadu/QQ-agent](https://github.com/Ksanadu/QQ-agent) 的 fork。** 原版的 `main` 在本仓库的 `upstream` 分支；下面是这个分支在原版之上加的东西，原版说明从「一个跑在你自己电脑上的…」那段开始。
+>
+> **不接第三方 API 也能跑**
+> - **Claude Code 桥**（`npm run bridge`，`scripts/claude-code-bridge.mjs`）：本机起一个 OpenAI 兼容接口（`/v1/chat/completions`），背后调 `claude -p`，用的是本机 Claude Code 的登录（订阅）。工具调用、图片、JSON 输出双向翻译。程序本体不用改：设置里 API 地址填 `http://127.0.0.1:3456/v1`，模型填 `sonnet` / `opus` / `haiku`，Key 随便填。
+> - **Anthropic API 桥**（`npm run bridge:api`，`scripts/anthropic-bridge.mjs`）：同一个接口，后端换成官方 SDK + `ANTHROPIC_API_KEY`。原生 tool_use 映射、系统提示走缓存、工具循环里回传 thinking 块、服务端 web_search、被拒时自动 fallback。
+> - 也可以不走桥，直接在设置里把 Base URL 填 `https://api.anthropic.com/v1`、模型填 `claude-sonnet-5-5`（Key 必须是挂在某个 workspace 下的）。
+>
+> **搜索**
+> - **联网搜索走 Claude Code**：桥的 `/v1/search` 接口，在「搜索服务 → 添加自定义搜索服务」里选「JSON 搜索接口（POST）」、地址填 `http://127.0.0.1:3456/v1/search` 即可。
+> - **`search_images`（搜网图）**：原来的百度 / Bing 图片页面解析已经抓不到结果，现在先问当前选中的自定义搜索服务要图片直链（桥会搜索并打开页面找图），解析器留作兜底。
+>
+> **修复**
+> - `send_image` 发不出 WebP：工具里自带的图片类型判断把 WebP 的魔数比错了（8 个字节去比 `RIFF`），永远不成立；改用公共的 `image-type.js`。另外下载图片时不再在 `Accept` 里报 `image/avif`——图床会按它协商回 AVIF，QQ 发不了。
+> - 发表情 / 看表情会被慢的 QQ 图床拖死整个会话：现在优先读本地转存，下载加总时限。
+>
+> **机器人行为**
+> - 聊天记录里群主、管理员带 `[群主]` `[管理员]` 标签，模型知道谁有管理权限。
+> - 表情自动收藏：`sticker.autoCollectFrom` 里列出的群友发的表情自动进表情库，模型看图写一句"画面是什么，什么时候发"的备注；"谁让存的"这种空话备注会看图重写。
+> - 模型照抄示例里的 `" / "` 分条记号时，自动拆成真正的多条消息。
+> - 群友印象里一律用"你"称呼机器人自己，不写"机器人""bot"。
+>
+> 离线测试新增了对应用例，`node test/coverage-offline.mjs` 全部通过。
+
 一个跑在你自己电脑上的 QQ 群聊机器人：装完双击启动，扫码登录，填个模型 Key 就能用。
 事件驱动 + 无状态会话架构，每次处理的 token 成本恒定可控；所有操作都在图形控制台里完成，不用碰命令行。
 从 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) 彻底改造而来的独立 QQ agent 应用。
