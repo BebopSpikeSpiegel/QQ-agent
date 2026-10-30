@@ -588,11 +588,48 @@ export async function baiduImageSearch(query, { limit = 8, browseLocked = false 
  * 为什么"自动换源"很重要：这两家的 HTML 结构都随时可能改版，
  * 只押一个源的话，改版当天功能就整个不可用。
  */
+/**
+ * 自定义搜索服务的图片模式：POST { query, images: true } 到当前选中的 JSON 搜索接口，
+ * 要它直接回图片直链（Claude Code 桥 /v1/search 支持；不支持的接口会回网页链接，send_image 那步会拦下）。
+ * 当前提供方不是 JSON 型自定义搜索时返回 null，表示"这条路不可用"，由调用方跳过。
+ */
+export async function customImageSearch(query, { limit = 8 } = {}) {
+  const provider = String(getConfig().webSearch?.provider || '').toLowerCase();
+  if (provider !== 'custom' && !provider.startsWith('custom:')) return null;
+  const cfg = resolveCustomConfig(provider);
+  if (String(cfg.type || 'openai').toLowerCase() !== 'openai') return null;
+  const endpoint = String(cfg.baseUrl || '').replace(/\/+$/, '');
+  if (!endpoint) return null;
+  const apiKey = String(cfg.apiKey || '').trim();
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) },
+    body: JSON.stringify({ query, q: query, images: true, top_k: limit, count: limit }),
+    // 图片模式要搜索 + 打开页面，比普通搜索慢
+    signal: AbortSignal.timeout(Math.max(60000, Number(cfg.timeoutMs) || 0) + 30000)
+  });
+  if (!res.ok) throw new Error(`自定义图搜 HTTP ${res.status}：${(await res.text().catch(() => '')).slice(0, 200)}`);
+  const data = await res.json().catch(() => ({}));
+  return (Array.isArray(data?.results) ? data.results : [])
+    .filter((r) => /^https?:\/\//i.test(String(r?.url || '')))
+    .map((r) => ({ title: String(r.title ?? '').trim(), url: String(r.url) }))
+    .slice(0, limit);
+}
+
 export async function searchImages(query, { limit = 8, browseLocked = false } = {}) {
   const q = String(query ?? '').trim();
   if (!q) throw new Error('搜索关键词为空');
   const n = Math.max(1, Math.min(12, Number(limit) || 8));
   const errors = [];
+  // 浏览锁定时不走自定义图搜：它返回的图床地址不经白名单
+  if (!browseLocked) {
+    try {
+      const list = await customImageSearch(q, { limit: n });
+      if (list?.length) return list;
+    } catch (error) {
+      errors.push(`customImageSearch: ${error?.message ?? error}`);
+    }
+  }
   // 顺序：百度在前（中文关键词命中率更好），Bing 兜底
   for (const fn of [baiduImageSearch, bingImageSearch]) {
     try {

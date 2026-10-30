@@ -254,6 +254,23 @@ const SEARCH_SCHEMA = {
 function searchPlan(body) {
   const query = String(body.query ?? body.q ?? '').trim().slice(0, 300);
   const topK = Math.min(8, Math.max(1, Number(body.top_k ?? body.count) || 6));
+  if (body.images === true) {
+    // 图片模式（search_images 用）：要的是能直接下载的图片直链，不是网页链接
+    return {
+      model: SEARCH_MODEL,
+      effort: '',
+      tools: 'WebSearch,WebFetch',
+      system: `找跟用户关键词相关的图片，交出最多 ${topK} 条图片直链。步骤固定：先 WebSearch；`
+        + '再用 WebFetch 打开最相关的一两个页面（wiki、百科、新闻页优先），prompt 写"列出页面里所有图片的完整地址（img src）"；'
+        + '看完页面再交结果，没打开过页面不要交。url 必须是图片文件本身（.png/.jpg/.jpeg/.gif/.webp 或图床 CDN 地址），'
+        + '不要网页链接、不要 logo/头像/备案图标。缩略图可以；能从缩略图路径看出原图地址的（如 MediaWiki 的 /thumb/.../200px-x.png → 去掉 thumb 和尺寸段），原图放前面、缩略图放后面。'
+        + 'title 写这张图是什么（中文，十个字以内）。snippet 写来源网站。页面里确实没有相关图片才交空数组。',
+      content: [{ type: 'text', text: query }],
+      schema: SEARCH_SCHEMA,
+      mode: 'search',
+      query
+    };
+  }
   return {
     model: SEARCH_MODEL,
     effort: '',
@@ -352,7 +369,7 @@ const server = http.createServer(async (req, res) => {
         return send(res, Number(r.api_error_status) || 502, { error: { message: String(r.result || r.subtype || 'claude error') } });
       }
       const results = (r.structured_output?.results || []).filter((x) => x?.url);
-      log(`✓ search "${sp.query.slice(0, 40)}" → ${results.length} results ${Date.now() - started}ms`);
+      log(`✓ search${body.images === true ? '(images)' : ''} "${sp.query.slice(0, 40)}" → ${results.length} results ${Date.now() - started}ms`);
       return send(res, 200, { query: sp.query, results });
     } catch (error) {
       if (abort.signal.aborted) return;
