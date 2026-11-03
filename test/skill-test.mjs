@@ -264,7 +264,21 @@ async function main() {
     // 无档位（跟随默认）时不发参数 —— "不改用户网关行为"的默认姿态
     const noEffort = d.buildThinkingParams({ effort: '', dialect: 'deepseek' });
     assert.equal(noEffort.applied, false, '没选档位时不应主动加参数');
+    // Claude：开启走 adaptive，显式预算才发旧式 budget_tokens，off 不发 disabled（新模型 400）
+    assert.deepEqual(d.buildThinkingParams({ effort: 'high', dialect: 'anthropic' }).params, { thinking: { type: 'adaptive' } },
+      'Claude 开启应发 adaptive，不能发缺预算的 enabled');
+    assert.deepEqual(d.buildThinkingParams({ effort: 'high', dialect: 'anthropic', budget: 2048 }).params,
+      { thinking: { type: 'enabled', budget_tokens: 2048 } }, '显式预算才发 budget_tokens');
+    assert.equal(d.buildThinkingParams({ effort: 'off', dialect: 'anthropic' }).applied, false,
+      'Claude off 不应发 thinking.disabled（Opus 5.5 / Sonnet 5.5 会 400）');
     ok('思考参数构造：六档按方言翻译，未知渠道/未选档位保持空');
+
+    // Claude 不接受 temperature < 1：直连 Anthropic 时整段删掉，OpenRouter 等网关不受影响
+    assert.equal(d.dialectRejectsTemperature(d.detectDialect({ baseUrl: 'https://api.anthropic.com/v1/', model: 'claude-opus-5-5' }).dialect), true,
+      'Anthropic 直连应声明不发 temperature');
+    assert.equal(d.dialectRejectsTemperature(d.detectDialect({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat' }).dialect), false,
+      '其他渠道照常发 temperature');
+    ok('采样参数：Claude 直连省略 temperature，其他渠道不变');
 
     // resolveThinkingRequest：旧三态（thinkingMode）兼容 + 按次覆盖
     const rOn = d.resolveThinkingRequest({ thinkingMode: 'on' });

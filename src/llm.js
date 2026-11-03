@@ -3,8 +3,9 @@
 import { getConfig } from './config.js';
 import { resolveModelPrice, priceAt } from './model-prices.js';
 import { skillManager } from './skills/manager.js';
+import { useAnthropicNative, postAnthropicNative } from './anthropic-native.js';
 import {
-  resolveThinkingRequest, buildThinkingParams, stripThinkingParams,
+  resolveThinkingRequest, buildThinkingParams, stripThinkingParams, detectDialect, dialectRejectsTemperature,
   looksLikeThinkingRejection, extractReasoning, extractReasoningTokens, THINKING_BODY_KEYS
 } from './thinking.js';
 
@@ -371,6 +372,10 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
 
   /** 发一次请求。返回 { ok, status, text, headers }，网络层错误直接抛。 */
   const post = async (body) => {
+    // api.anthropic.com 直连改走原生 Messages API（兼容口不带提示词缓存），返回形状不变
+    if (useAnthropicNative(api)) {
+      return postAnthropicNative(body, { apiKey: api.apiKey, baseUrl: api.baseUrl, signal: controller.signal, timeoutMs });
+    }
     const res = await fetch(joinUrl(api.baseUrl, '/chat/completions'), {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...authHeaders(api.apiKey, api.baseUrl, api.model) },
@@ -382,7 +387,8 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
   };
 
   const baseBody = buildBaseBody();
-  if (temp !== null && temp !== undefined && Number.isFinite(Number(temp))) baseBody.temperature = Number(temp);
+  const fixedSampling = dialectRejectsTemperature(detectDialect({ baseUrl: api.baseUrl, model: api.model }).dialect);
+  if (!fixedSampling && temp !== null && temp !== undefined && Number.isFinite(Number(temp))) baseBody.temperature = Number(temp);
   const transformed = await applyRequestTransforms(baseBody);
   let body = transformed.body;
   const removedTemperature = transformed.removedTemperature;

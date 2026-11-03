@@ -2,9 +2,9 @@
 // 和 claude-code-bridge.mjs 同一个口子、同一套路由，区别只在后端：这里按 API Key 计费，不走 Claude Code 订阅。
 //
 // 用法：
-//   setx ANTHROPIC_API_KEY "sk-ant-..."   （自己在终端里设，不要贴进聊天）
+//   Key：程序设置里这个服务的「API Key」栏填上即可（随请求发过来）；或者 setx ANTHROPIC_API_KEY "sk-ant-..."（环境变量优先）
 //   node scripts/anthropic-bridge.mjs [--port 3456] [--model sonnet] [--effort low] [--parallel 4]
-// 程序设置不用动：API 地址 http://127.0.0.1:3456/v1，模型 sonnet / opus / haiku / fable（或完整 id），Key 随便填。
+// 程序设置：API 地址 http://127.0.0.1:3456/v1，模型 sonnet / opus / haiku / fable（或完整 id）；没设环境变量时 Key 填真的 Anthropic API Key。
 //
 // 做法：
 //   · system 消息 → system（带 cache_control，人设 + 准则每轮都一样，走缓存省钱）
@@ -15,6 +15,7 @@
 //   · 默认带 fallbacks: "default"：被安全分类器拒掉时服务端自动换模型重跑（--no-fallbacks 关掉）
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import Anthropic from '@anthropic-ai/sdk';
 
 function parseArgs(argv) {
@@ -38,11 +39,18 @@ const MAX_TOKENS = Math.max(1024, Number(ARGS['max-tokens'] || 16000));
 const USE_FALLBACKS = ARGS['no-fallbacks'] == null;
 const SEARCH_MODEL = String(ARGS['search-model'] || 'haiku');
 
-if (!process.env.ANTHROPIC_API_KEY) {
-  console.error('没有 ANTHROPIC_API_KEY 环境变量。先在自己的终端里 setx ANTHROPIC_API_KEY "sk-ant-..."，再开一个新终端运行。');
-  process.exit(1);
+// Key 两个来源：ANTHROPIC_API_KEY 环境变量优先；没设就用请求头里的 Authorization: Bearer
+// （程序设置里搜索服务 / 模型 API 的「API Key」那一栏就是这么发过来的），这样不用碰环境变量也能用。
+const ENV_KEY = String(process.env.ANTHROPIC_API_KEY || '').trim();
+if (!ENV_KEY) console.warn('没有 ANTHROPIC_API_KEY 环境变量：改用每个请求自带的 API Key（在程序设置里填）。');
+const requestKey = new AsyncLocalStorage();
+const clients = new Map();
+function currentClient() {
+  const key = ENV_KEY || requestKey.getStore() || '';
+  if (!key) throw Object.assign(new Error('没有 API Key：在程序设置里这个服务的「API Key」栏填上，或者设 ANTHROPIC_API_KEY 环境变量'), { status: 401 });
+  if (!clients.has(key)) clients.set(key, new Anthropic({ apiKey: key, timeout: TIMEOUT_MS, maxRetries: 2 }));
+  return clients.get(key);
 }
-const client = new Anthropic({ timeout: TIMEOUT_MS, maxRetries: 2 });
 
 const MODEL_IDS = { sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5', haiku: 'claude-haiku-5-5', fable: 'claude-fable-5-1' };
 // 服务端 fallbacks: "default" 只在这几个模型上可用
@@ -194,6 +202,7 @@ function plan(body, { replayThinking = true } = {}) {
 }
 
 async function callClaude(params, signal) {
+  const client = currentClient();
   const req = { ...params };
   const betas = [];
   if (USE_FALLBACKS && FALLBACK_MODELS.has(req.model)) {
@@ -303,7 +312,12 @@ function apiError(error) {
   return { status, message: error.message };
 }
 
-const server = http.createServer(async (req, res) => {
+const server = http.createServer((req, res) => {
+  const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  requestKey.run(bearer, () => handle(req, res));
+});
+
+async function handle(req, res) {
   // 只给本机程序用：浏览器页面（带 Origin）和 DNS rebinding（Host 不是本机）一律拒绝，
   // 否则任何网页都能借这个口子花你的 API 额度
   const host = String(req.headers.host || '').replace(/:\d+$/, '');
@@ -369,7 +383,7 @@ const server = http.createServer(async (req, res) => {
     log(`✗ ${p?.params.model ?? '?'} ${e.status} ${e.message.slice(0, 300)}`);
     send(res, e.status, { error: { message: e.message, type: 'anthropic_bridge' } });
   }
-});
+}
 
 server.listen(PORT, '127.0.0.1', () => {
   log(`Anthropic API 桥已就绪：http://127.0.0.1:${PORT}/v1  默认模型=${resolveModel('')} effort=${DEFAULT_EFFORT} 并发=${MAX_PARALLEL}`

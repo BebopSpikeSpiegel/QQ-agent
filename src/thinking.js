@@ -64,6 +64,17 @@ export const DIALECT_LABELS = {
   generic: '通用（不发送思考参数）'
 };
 
+/**
+ * 不接受采样参数的方言：Claude 4.7 起 temperature < 1 一律 400（OpenAI 兼容层同口径），
+ * 而本程序默认 0.8、记忆整理 / 裁判 / 连通性测试还写死了 0 与 0.2 —— 不删就每次都失败。
+ * 与"思考互斥删温度"不同：这里删掉的温度在降级重试时**不还原**（还原了照样 400）。
+ */
+const FIXED_SAMPLING_DIALECTS = new Set(['anthropic']);
+
+export function dialectRejectsTemperature(dialect) {
+  return FIXED_SAMPLING_DIALECTS.has(dialect);
+}
+
 /** 用户可选的思考档位（off = 明确关闭，其余 = 开启且强度递增）。 */
 export const THINKING_EFFORTS = ['off', 'low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -205,12 +216,13 @@ export function buildThinkingParams({ effort = '', dialect = 'generic', budget =
       break;
     }
     case 'anthropic': {
+      // Claude 4.6 起用 adaptive；只有显式填了预算才发旧式 enabled + budget_tokens
+      // （Haiku 4.5 等旧模型要它；新模型收到 budget_tokens 会 400）。
+      // 不带预算的 { type: 'enabled' } 在任何模型上都是非法请求。
+      // off 不发 disabled：Opus 5.5 / Sonnet 5.5 / Fable 收到它直接 400，
+      // 而不发参数时旧模型本来就不思考 —— 不发是唯一对所有 Claude 都安全的写法。
       if (on) {
-        params.thinking = { type: 'enabled' };
-        if (b > 0) params.thinking.budget_tokens = b;
-        applied = true;
-      } else if (e === 'off') {
-        params.thinking = { type: 'disabled' };
+        params.thinking = b > 0 ? { type: 'enabled', budget_tokens: b } : { type: 'adaptive' };
         applied = true;
       }
       break;
