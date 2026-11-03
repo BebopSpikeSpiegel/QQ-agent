@@ -515,9 +515,12 @@ async function installQqPortable() {
   fs.mkdirSync(QQ_CACHE_DIR, { recursive: true });
 
   const installerPath = path.join(QQ_CACHE_DIR, QQ_INSTALLER_NAME);
+  // 机器上已经装了 QQ（或 --from 指定了目录）就直接复制，用不着兜底安装包。
+  // 之前这里无条件先下安装包：分发站 404 时 setup 直接失败，根本走不到下面"复制已装 QQ"那条路。
+  const needInstaller = !foundQqExe() && !FROM_DIR && !findInstalledQq();
 
   // 如果缓存里有之前下载的安装器，先校验
-  if (fs.existsSync(installerPath)) {
+  if (needInstaller && fs.existsSync(installerPath)) {
     const hash = fileSha256(installerPath);
     if (!QQ_X64_SHA256) {
       // 没配哈希时不能判"不匹配" —— 那会导致每次 setup 都重下一遍几百 MB
@@ -531,7 +534,7 @@ async function installQqPortable() {
   }
 
   // 下载 QQ 安装包
-  if (!fs.existsSync(installerPath)) {
+  if (needInstaller && !fs.existsSync(installerPath)) {
     try {
       const dl = await download(QQ_X64_URL, installerPath, {
         expectedSha256: QQ_X64_SHA256 || null,
@@ -561,9 +564,11 @@ async function installQqPortable() {
   // 原来写死 NSIS 的 `/s /D=`。用错开关的典型后果是安装器**弹出 GUI 等人点**，
   // 脚本一直等到超时被杀 —— 表现就是"退出码取不到"。
   let kind = null;
-  try { kind = detectInstallerTypeFromFile(installerPath); } catch { /* ignore */ }
-  if (kind) log(`安装包类型：${kind.label}（命中特征 ${kind.matched}）→ 使用 ${kind.note}`);
-  else warn('安装包类型未识别（不是常见的 NSIS / Inno / InstallShield 之一）');
+  if (fs.existsSync(installerPath)) {
+    try { kind = detectInstallerTypeFromFile(installerPath); } catch { /* ignore */ }
+    if (kind) log(`安装包类型：${kind.label}（命中特征 ${kind.matched}）→ 使用 ${kind.note}`);
+    else warn('安装包类型未识别（不是常见的 NSIS / Inno / InstallShield 之一）');
+  }
 
   // ── 决定"从哪里拿 QQ" ──
   // 便携运行靠的是 --user-data-dir，**并不需要一份干净的程序文件**，
