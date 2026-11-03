@@ -71,10 +71,24 @@ export function mergeStickerLibrary(existing, fetched) {
     const id = String(item?.emoji_id || item?.resId || item?.id || '').trim();
     if (id) fetchedIds.add(id);
   }
+  // collect_sticker 收的图会同时 add_custom_face 进 QQ 收藏，下次同步 QQ 列表里就多出一条
+  // id=emoji_id 的同一张图。按 emojiId 认亲，并回 collected_ 条目，不另起一条（否则表情库里
+  // 每张收藏图都成对出现，带标签的一条 + 空白的一条）。
+  // 早期收的条目没记 emojiId，再按 md5 认一次（QQ 收藏的 md5 就是图片文件的 md5）。
+  const byEmoji = new Map(out.filter((e) => e.emojiId).map((e) => [e.emojiId, e]));
+  const byMd5 = new Map(out.filter((e) => e.md5 && String(e.id).startsWith('collected_')).map((e) => [e.md5, e]));
   for (const item of Array.isArray(fetched) ? fetched : []) {
     if (!item || typeof item !== 'object') continue;
     const id = String(item.emoji_id || item.resId || item.id || '').trim();
     if (!id) continue;
+    const md5 = String(item.md5 || '').trim().toUpperCase();
+    const twin = !byId.has(id) ? (byEmoji.get(id) || (md5 && byMd5.get(md5)) || null) : null;
+    if (twin) {
+      if (!twin.emojiId) { twin.emojiId = id; byEmoji.set(id, twin); }
+      if (!twin.md5 && item.md5) twin.md5 = String(item.md5).trim().toUpperCase();
+      if (!String(twin.url || '').startsWith('file:///') && item.url) twin.url = String(item.url).trim();
+      continue;
+    }
     const old = byId.get(id);
     const merged = normalizeStickerEntry({
       ...(old || {}),

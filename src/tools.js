@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import { getConfig } from './config.js';
 import { registerChatFeatureTools } from './chat-feature-tools.js';
 import { assertDeliveryAllowed } from './chat-policy.js';
-import { recordSendMessageDelivery, hasSendMessageDelivery, DELIVERY_REQUIRED } from './reply-completion.js';
+import { recordSendMessageDelivery, recordStickerDelivery, hasSendMessageDelivery, deliverySatisfied, DELIVERY_REQUIRED } from './reply-completion.js';
 import { normalizeMessageList, unquoteJsonString } from './util.js';
 import { formatStickerList } from './stickers.js';
 import { skillManager } from './skills/manager.js';
@@ -32,7 +32,11 @@ import { isGifBuffer, gifToVideoDataUrl, resolveGifRoute } from './gif-to-video.
 /** 当前配置的 GIF 选路（vision/video 开关组合，规则矩阵见 resolveGifRoute 注释）。 */
 function currentGifRoute() {
   const cfg = getConfig();
-  return resolveGifRoute({ vision: cfg.api?.vision !== false, video: cfg.api?.video === true });
+  // 视频选路说了"不原生读视频"（frames/off，或 auto 但没配全模态 videoModel），GIF 也不能转视频发：
+  // 主模型不吃 video 部件，Claude 直接 400（messages.N.user.content.str: Input should be a valid string）。
+  const mode = String(cfg.api?.videoMode || 'auto');
+  const nativeVideo = mode === 'native' || (mode === 'auto' && String(cfg.api?.videoModel || '').trim() !== '');
+  return resolveGifRoute({ vision: cfg.api?.vision !== false, video: cfg.api?.video === true && nativeVideo });
 }
 
 /** 给一个可能永远不 settle 的 promise 加总时限（requestOnce 的 timeout 只管空闲，慢速流/多跳重定向能拖好几分钟）。 */
@@ -296,7 +300,7 @@ function registerAllTools() {
   registerTool({
     id: 'send_sticker',
     name: '发送表情',
-    description: '发送一个 QQ 收藏表情（一条消息只能一张表情，不能附带文字；想说的话先用 send_message 单独发）。stickerId 从 list_stickers 获取。',
+    description: '发送一个 QQ 收藏表情（一条消息只能一张表情，不能附带文字；想说的话另用 send_message 发）。单发一张、不说话也算回复了。stickerId 照抄【可用表情包】里的 id，不在里面的再用 list_stickers 查。',
     category: 'messaging',
     icon: '😀',
     parameters: {
@@ -346,6 +350,7 @@ function registerAllTools() {
           atUserId: args.atUserId ?? null
         });
         ctx.stickers.markUsed(sticker.id, String(ctx.session.triggerText || '').slice(0, 100));
+        recordStickerDelivery(ctx);
         if (!ctx.sender.recordsDeliveries) ctx.session.sent.push({ type: 'sticker', text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
         ctx.emit('session-update', ctx.session.id);
         return ok({ sent: true, messageId: result?.message_id ?? null, note: '表情已发送。' });
@@ -498,8 +503,8 @@ function registerAllTools() {
     async execute(ctx, args) {
       try {
         const result = await ctx.sender.reactMessage(ctx.chatKey, args);
-        return ok({ ...result, note: hasSendMessageDelivery(ctx)
-          ? '贴表情动作成功，当前会话已有文字交付；不必机械汇报“已贴表情”。'
+        return ok({ ...result, note: deliverySatisfied(ctx)
+          ? '贴表情动作成功；不必机械汇报“已贴表情”。'
           : '贴表情动作成功不代表会话完成。' + DELIVERY_REQUIRED });
       } catch (error) { return err(error?.message ?? error); }
     }
@@ -706,7 +711,12 @@ function registerAllTools() {
               parsedUrl.searchParams.set('spec', '720');
               imageUrl = parsedUrl.toString();
             }
-            results.push(await downloadImageAsDataUrl(imageUrl));
+            // DNS/连接抖动重试一次（11/01 23:17 一次 EAI_AGAIN 就让机器人在群里说"图没加载出来"）
+            results.push(await downloadImageAsDataUrl(imageUrl).catch(async (e) => {
+              if (!/域名解析失败|EAI_AGAIN|ENOTFOUND|ECONNRESET|ETIMEDOUT|fetch failed|socket hang up|超时/i.test(String(e?.message ?? e))) throw e;
+              await new Promise((r) => setTimeout(r, 1500));
+              return downloadImageAsDataUrl(imageUrl);
+            }));
           } catch (e) { failed.push(String(e?.message ?? e)); }
         }
         if (!results.length) return err(`图片获取失败：${failed.join('；')}`);
@@ -883,7 +893,7 @@ function registerAllTools() {
   registerTool({
     id: 'finish',
     name: '结束会话',
-    description: '结束当前会话。必须先通过 send_message 向当前聊天实际发送成功；只贴表情、发图、普通输出或发送失败时不可完结。summary 只供管理端记录，不会发给群友。',
+    description: '结束当前会话。有人 @你、引用你、拍你或私聊时，必须先通过 send_message 向当前聊天实际发送成功才能完结（只贴表情、发图、普通输出或发送失败都不算）；没人叫你、是你自己凑进来看的，看完不想说就直接调用它，不用硬憋一句。summary 只供管理端记录，不会发给群友。',
     category: 'system',
     icon: '✅',
     parameters: {
@@ -895,7 +905,7 @@ function registerAllTools() {
       required: ['summary']
     },
     async execute(ctx, args) {
-      if (!hasSendMessageDelivery(ctx)) return err(DELIVERY_REQUIRED);
+      if (!deliverySatisfied(ctx)) return err(DELIVERY_REQUIRED);
       ctx.session.finishReason = String(args.summary ?? '').slice(0, 300);
       // 活跃模式（chatActive）：模型在 finish 时带回话题总结。
       // orchestrator 读取 session.activeTopic 决定是否开启/维持活跃期。

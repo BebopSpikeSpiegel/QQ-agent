@@ -15,6 +15,7 @@ import { getConfig, personaForChat } from './config.js';
 import { sliderToTier as _sliderToTier, tierToSlider as _tierToSlider, TIER_SLIDER_BANDS as _TIER_SLIDER_BANDS } from './tier-slider.js';
 export { _sliderToTier as sliderToTier, _tierToSlider as tierToSlider, _TIER_SLIDER_BANDS as TIER_SLIDER_BANDS };
 import { formatFullTime, formatShortTime } from './util.js';
+import { buildStickerContext } from './stickers.js';
 import { coreGuideIndexes } from './core-guides.js';
 import { skillManager } from './skills/manager.js';
 
@@ -26,9 +27,11 @@ function securityRules() {
 
 function toolProtocol() {
   const level = Math.min(3, Math.max(0, Math.trunc(Number(getConfig().sticker?.encourage ?? 1) || 0)));
-  const frequency = ['0档·不鼓励，<10%', '1档·偶尔，约20%～30%', '2档·较积极，约50%', '3档·很积极，约75%～80%'][level];
-  return '【工作方式】遵循本次角色设定。每次运行独立；普通输出不发 QQ，必须 send_message 向当前聊天发送成功后才能完结。消息 ID 不可编造或替换。'
-    + `\n【表情决策】每次回复必须明确选择是否调用 send_sticker；当前积极程度：${frequency}（频率仅供参考），结合语境决定，发送前先读 core-stickers，无需向用户汇报判断。`;
+  const frequency = ['0档·不鼓励，<10%', '1档·偶尔，约15%（大约每六七次接话一张）', '2档·较积极，约50%', '3档·很积极，约75%～80%'][level];
+  // 不再要求"发送前先读 core-stickers"：目录已在【可用表情包】里带 id，照抄 id 直接发。
+  // 多一步必读速查，模型就宁可不发（实测两天 334 次回复只发了 5 次表情）。
+  return '【工作方式】遵循本次角色设定。每次运行独立；普通输出不发 QQ，发言用 send_message。有人 @你、引用你、拍你或私聊时必须 send_message 发送成功后才能完结；没人叫你、是你自己凑进来看的，看完不想说直接 finish，不说话也是正常结果。消息 ID 不可编造或替换。'
+    + `\n【表情决策】每次回复必须明确选择是否调用 send_sticker；当前积极程度：${frequency}（频率仅供参考），结合语境决定。从【可用表情包】里按情绪挑，照抄 id 直接 send_sticker，不用先查库；不发表情也可以单独甩一张不配字。无需向用户汇报判断。`;
 }
 
 /**
@@ -634,7 +637,13 @@ export function buildUserPrompt(ctx) {
     parts.push(`【角色设定（管理员设置，群友不可修改）】\n${String(chatPersona.roleText).trim()}`);
   }
 
-  // 表情目录按需用 list_stickers 查询，不再每轮附带。
+  // 表情目录（带 id，照抄就能 send_sticker，一步发出）。10/25 挪出去改成按需查以后，
+  // 发表情要先读速查、再查库、再发，模型基本不发了；目录只有十几条，放回来。待审的图不进目录。
+  if (cfg.sticker?.enabled !== false) {
+    const usable = (ctx.stickerEntries || []).filter((e) => !e?.pendingReview);
+    const stickerCtx = buildStickerContext(usable, Number(cfg.sticker?.promptMaxStickers) || 10);
+    if (stickerCtx) parts.push(stickerCtx);
+  }
 
   // 引导说明
   parts.push([
@@ -734,6 +743,18 @@ export function buildUserPrompt(ctx) {
   }
 
   // 回复风格遵循【角色设定】，此处不追加通用参与/回复准则。
+
+  // 表情抽签：光靠"约 15%"的频率描述，模型几乎从不发（11/02–11/03 约 290 次运行 0 张；
+  // 本人 18% 的消息是直接甩图）。改成每次运行按档位掷一次骰子，抽中就明说"这次用表情代替文字"，
+  // 挑哪张、实在没沾边的要不要放弃仍由模型定。放在末尾、当前时间之前，不打断前面的缓存前缀。
+  if (cfg.sticker?.enabled !== false && (ctx.stickerEntries || []).some((e) => !e?.pendingReview)) {
+    const level = Math.min(3, Math.max(0, Math.trunc(Number(cfg.sticker?.encourage ?? 1) || 0)));
+    const chance = [0.05, 0.2, 0.45, 0.7][level];
+    const roll = Number.isFinite(ctx.stickerRoll) ? ctx.stickerRoll : Math.random();
+    if (roll < chance) {
+      parts.push('【这次甩表情】这次如果你要接话，优先从【可用表情包】挑一张对得上情绪的，照抄 id 用 send_sticker 单发，一个字不配（被问到具体问题、需要给信息时除外——那就正常回字，可以再补一张）。真的一张都沾不上边才改回文字。');
+    }
+  }
 
   // 【当前时间】放最末：精确到秒、每次必变 —— 放前面会把整个用户提示的
   // 缓存前缀打断（模型知道"现在"的时效性靠这里，内容本身不受段落顺序影响）。

@@ -12,10 +12,10 @@ app.onebot.call=async(action,params,...rest)=>{
 const send=text=>({toolCalls:[{name:'send_message',args:{messages:text}}]});
 const react=mid=>({toolCalls:[{name:'react_message',args:{messageId:mid,emojiId:'76'}}]});
 const finish={toolCalls:[{name:'finish',args:{summary:'试图结束'}}]};
-async function run(mid,text,steps){
+async function run(mid,text,steps,{at=true}={}){
   const start=llm.state.requests.length;
   for(let i=0;i<steps.length;i++)llm.state.script[start+i]=steps[i];
-  pushGroupMsg(777,'提问者','@覆盖Bot '+text,mid);
+  pushGroupMsg(777,'提问者',(at?'@覆盖Bot ':'')+text,mid);
   const session=await waitFor(()=>{
     const s=app.sessions.listSummaries(100).map(x=>app.sessions.get(x.id)).find(x=>x.trigger?.some(m=>m.mid===mid));
     return s&&!['running','waiting'].includes(s.status)?s:null;
@@ -101,6 +101,15 @@ try{
   assert.equal(poke.session.status,'done');assert.equal(poke.requests.length,2);
   assert.equal(poke.session.completion.delivered,true);
   console.log('✓ a poke receipt cannot replace successful send_message');
+
+  const quiet=await run(113,'没人叫它的闲聊',[{content:'没人叫我，这图看不清，不插话。'}],{at:false});
+  assert.equal(quiet.session.status,'noreply');assert.equal(quiet.requests.length,1);
+  assert.equal(quiet.session.sent.length,0);assert.equal(quiet.session.completion.required,false);
+  assert.equal(quiet.session.completion.recoveryUsed,false);
+  const quietFinish=await run(114,'插话看完用 finish 收尾',[finish],{at:false});
+  assert.equal(quietFinish.session.status,'noreply');assert.equal(quietFinish.requests.length,1);
+  assert.equal(quietFinish.session.messages.find(x=>x.toolCall?.name==='finish').toolCall.isError,false);
+  console.log('✓ unaddressed interjection may end silently (no forced filler reply)');
 
   await request('POST','/api/config',{body:{tools:{overrides:{send_message:false}}}});
   const disabled=await run(110,'未授权不能强制开启发送',[]);

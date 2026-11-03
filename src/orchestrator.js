@@ -24,7 +24,7 @@ import { rescueUnsentReply } from './reply-rescue.js';
 import { captureReactionTargets } from './message-reactions.js';
 import { ConversationTasks } from './conversation-tasks.js';
 import { ImageAlbum } from './image-album.js';
-import { beginReplyCompletion, hasSendMessageDelivery, DELIVERY_REQUIRED } from './reply-completion.js';
+import { beginReplyCompletion, hasSendMessageDelivery, deliverySatisfied, DELIVERY_REQUIRED } from './reply-completion.js';
 
 export class Orchestrator {
   constructor({ store, memory, stickers, sender, sessions, onebot, emit = null, reminders = null, videoReader = null, approvals = null }) {
@@ -799,6 +799,13 @@ export class Orchestrator {
     // （原"上下文统计"三件套 —— 最近消息密度/上次发言时间/最后消息时间 ——
     //  只喂【此刻状态】段，该段 2026-09-25 删除后不再计算。）
 
+    // 表情库快照（提示词用）。10/25 曾挪出提示词改成按需 list_stickers，结果发表情要先读速查、
+    // 再查库、再发，三步太贵，模型基本不发了（两天 334 次回复只发了 5 次）。目录很小，放回来。
+    let stickerEntries = [];
+    if (cfg.sticker?.enabled !== false) {
+      try { stickerEntries = (await this.stickers.sync(false)).entries ?? []; } catch { stickerEntries = []; }
+    }
+
     // ── 统一可用性上下文 ──
     // 视觉判定 = 全局开关 && 选中模型未被探测为"明确不支持图片"（未探测/unknown 时保持开关行为）
     const visionEnabled = cfg.api.vision !== false
@@ -872,6 +879,7 @@ export class Orchestrator {
       taskBindings: this.tasks.forTriggers(chatKey, triggerEntries, this.store),
       store: this.store,
       memory: this.memory,
+      stickerEntries,
       selfNickname,
       runSeq: seq,
       moreUnreadDuringRun: this.store.unreadCount(chatKey) > 0,
@@ -973,7 +981,20 @@ export class Orchestrator {
       emit: (type, payload) => this.emit(type, payload)
     };
 
-    beginReplyCompletion(ctx);
+    // 有人在跟你说话才强制交付：私聊、被艾特/引用/拍一拍、关键词、关联监听确认的接续。
+    // 随机插话、活跃期、主动机会看完不说话可以直接结束。
+    // 不能直接看 tierInfo.tier：设成"全部响应"(4 档) 时被 @ 也报 4 档，所以按 2 档、零概率重判一次这批消息。
+    const addressed = !proactive && (String(chatKey).startsWith('private:')
+      || String(tierInfo?.reason || '').startsWith('关联监听')
+      || resolveContextTier({
+        triggerEntries,
+        selfNickname: cfg.persona?.selfNickname || this.onebot.selfNickname || '',
+        botName: cfg.persona?.botName || '',
+        selfId: cfg.onebot?.selfId || this.onebot.selfId || '',
+        cfg: { ...storeConfigForChat(chatKey), contextTier: 2, randomPercent: 0 },
+        roll: 100
+      }).tier > 0);
+    beginReplyCompletion(ctx, { required: addressed });
     const deliveryTools = toolDefs.filter(d => d.id === 'send_message');
     if (!deliveryTools.length) throw new Error('任务未完成：send_message 已禁用，无法交付当前聊天的文字回复');
     const maxRounds = Math.max(1, Number(cfg.api.maxRounds) || 12);
@@ -990,7 +1011,7 @@ export class Orchestrator {
     // One final, bounded send_message-only opportunity after the normal budget.
     for (let round = 0; round <= maxRounds && !finish; round++) {
       const deliveryRound = forceDeliveryOnly || round === maxRounds;
-      if (deliveryRound && hasSendMessageDelivery(ctx)) break;
+      if (deliveryRound && deliverySatisfied(ctx)) break;
       // 会话级中止（会话页「中止」按钮）：与全局 abort 同一条收尾路径。
       // 两个入口都会到这里：abortController 中断了在途请求（异常上抛后被
       // wake 的会话级重试判为不可重试 → #runAgent 正常返回 → 无需再拦），
@@ -1043,7 +1064,7 @@ export class Orchestrator {
       // 完成依据是 send_message 的成功回执，不能被表情等其他动作抵消。
       // 最后交付轮只催交付；资料不足也应如实回复，而不是编造答案。
       const roundsLeft = maxRounds - round;
-      if (!hasSendMessageDelivery(ctx) && (deliveryRound || roundsLeft <= 3)
+      if (!deliverySatisfied(ctx) && (deliveryRound || roundsLeft <= 3)
           && messages[messages.length - 1]?.role !== 'system') {
         if (deliveryRound) ctx.session.completion.recoveryUsed = true;
         messages.push({
@@ -1153,7 +1174,7 @@ export class Orchestrator {
           rawContent, triggerEntries, session, skillContext
         });
         if (!rescued.length) {
-          if (hasSendMessageDelivery(ctx) || deliveryRound) break;
+          if (deliverySatisfied(ctx) || deliveryRound) break;
           messages.push({role: 'user', content: `【交付未完成】${DELIVERY_REQUIRED}`});
           forceDeliveryOnly = true;
           continue;
@@ -1262,7 +1283,7 @@ export class Orchestrator {
         }
         this.sessions.update(session.id);
         this.emit('session-update', session.id);
-        if (name === 'finish' && !result.isError && hasSendMessageDelivery(ctx)) {
+        if (name === 'finish' && !result.isError && deliverySatisfied(ctx)) {
           finish = true;
           // ── 活跃模式状态机 ──
           // 模型 finish 时带回的 activeTopic / "话题结束" 决定活跃期走向：
@@ -1367,8 +1388,10 @@ export class Orchestrator {
 
     // Never label reaction/media-only runs as completed. Failure is terminal and
     // visible, rather than an infinite tool loop or an invented fallback answer.
-    if (!hasSendMessageDelivery(ctx)) throw new Error('任务未完成：未取得 send_message 的实际成功发送记录，已用完交付机会');
-    const status = session.error ? 'error' : 'done';
+    if (!deliverySatisfied(ctx)) throw new Error('任务未完成：未取得 send_message 的实际成功发送记录，已用完交付机会');
+    const silent = !hasSendMessageDelivery(ctx);
+    if (silent) session.finishReason = session.finishReason || '插话：看完决定不说话';
+    const status = session.error ? 'error' : silent ? 'noreply' : 'done';
     if (status === 'done' && !ctx.taskContextExplicit) {
       try { this.tasks.rememberInteraction(chatKey, triggerEntries, session.sent, ctx.viewedMessageIds, this.store); }
       catch (e) { session.messages.push({ taskContextError: String(e.message).slice(0, 200) }); }

@@ -101,7 +101,8 @@ const userPrompt = buildUserPrompt({
 for (const section of ['【当前时间】', '【角色设定', '【已读信息】', '【未读信息】', '【记忆】', '【引导说明】']) {
   assert.ok(userPrompt.includes(section), `用户提示缺少段落：${section}`);
 }
-assert.ok(!userPrompt.includes('【可用表情包】'), '表情目录应按需查询，不常驻上下文');
+// 表情目录 2026-10-31 放回提示词：按需查询要多走两步，模型基本不发表情了
+assert.ok(userPrompt.includes('【可用表情包】'), '表情目录应常驻上下文（带 id，一步发出）');
 assert.ok(!sys.includes('【表情包策略'), '表情用法已移入核心速查');
 for (const banned of ['沉睡前观察', 'qq_', '[SILENT]', '【此刻状态】', '【过去状态】', '【本次唤醒】']) {
   assert.ok(!userPrompt.includes(banned), `用户提示不应包含（已删除/改名段落）：${banned}`);
