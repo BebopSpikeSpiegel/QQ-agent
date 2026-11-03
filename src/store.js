@@ -297,6 +297,17 @@ export class ChatStore {
    * 用途：read_forward 工具把"合并转发占位符"永久升级成展开后的文本
    * —— 一次展开，以后谁（模型/存档页/金句）都直接读到内容。
    */
+  /** 给某条消息的第 index 个媒体补上本地文件路径（视频预下载完成后调用）。 */
+  setMediaPath(chatKey, localId, index, filePath) {
+    const st = this.#state(chatKey);
+    const m = st.messages.find((x) => x.id === localId);
+    const media = m && Array.isArray(m.media) ? m.media[index] : null;
+    if (!media) return false;
+    media.path = String(filePath || '');
+    saveChat(st);
+    return true;
+  }
+
   updateByMid(chatKey, mid, { text, appendMedia = [] } = {}) {
     const st = this.#state(chatKey);
     const target = String(mid);

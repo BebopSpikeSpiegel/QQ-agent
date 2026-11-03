@@ -39,10 +39,14 @@ import { startCommunitySync, isGloballyBlocked, FIXED_PRICE_FEED_URL } from './c
 // 全局 fetch（undici）默认连接建立超时只有 10 秒，openrouter.ai 这类海外端点
 // 握手慢时会直接报 "Connect Timeout Error ... timeout: 10000ms"（注意这不是
 // 请求超时——那是 llm.js 里 180 秒的 AbortSignal）。这里放宽到 30 秒。
+// headersTimeout 同理：undici 默认 300 秒等不到响应头就掐断（UND_ERR_HEADERS_TIMEOUT），
+// 而 OneBot upload_group_file 要等协议端把整个文件传完腾讯才回响应头——几十 MB 走海外线路
+// 动辄一两个小时，调用方给的 AbortSignal 再长也会被这 300 秒先掐掉。放到 6 小时当兜底，
+// 真正的时限交给各调用方自己的 AbortSignal。
 // 动态导入 + 容错：undici 与 Electron 内置 Node 不兼容时只退回默认超时，绝不崩主进程。
 try {
   const { Agent, setGlobalDispatcher } = await import('undici');
-  setGlobalDispatcher(new Agent({ connect: { timeout: 30_000 } }));
+  setGlobalDispatcher(new Agent({ connect: { timeout: 30_000 }, headersTimeout: 6 * 60 * 60_000 }));
 } catch (error) {
   console.warn('[net] 全局连接超时设置失败（使用 undici 默认值 10s）:', error?.message ?? error);
 }
@@ -946,14 +950,59 @@ export function createApp({ log = console.log } = {}) {
       atNames
     });
     emit('chat-update', `${kind}:${id}`);
-    // 逐条触发判定：把刚入库的条目交给编排器（entry 让它能精确标这一条已读）
-    orchestrator.onIncoming(`${kind}:${id}`, entry);
+    // 视频趁链接还新鲜先下载（QQ 视频链接约一小时过期），之后 read_video 直接读本地文件
+    (entry.media || []).forEach((m, i) => {
+      if (m?.kind !== 'video') return;
+      videoReader.prefetch(m).then((p) => {
+        if (p) store.setMediaPath(`${kind}:${id}`, entry.id, i, p);
+      }).catch(() => {});
+    });
+    // 确定性指令（message.command 插件，如「引用图 + /查番」）：被认领的消息照常留档，
+    // 但直接标已读、不交给编排器 —— 指令由插件按死规则处理，模型不再对同一条消息回第二遍
+    if (await dispatchMessageCommand(kind, id, entry, text)) {
+      store.markEntryRead(`${kind}:${id}`, entry.id);
+      emit('chat-update', `${kind}:${id}`);
+    } else {
+      // 逐条触发判定：把刚入库的条目交给编排器（entry 让它能精确标这一条已读）
+      orchestrator.onIncoming(`${kind}:${id}`, entry);
+    }
 
     // 链接媒体转发（确定性）：刻意不 await —— 百兆级下载/上传不能卡住 ingest 热路径。
     // 内部已把错误全部收口（含 provider 抛错），这里再挂一次 catch 只为防漏网。
     forwardLinkedMedia(kind, id, text).catch((e) => log(`[media] 链接转发失败：${e?.message ?? e}`));
     // 指定群友（config.sticker.autoCollectFrom）发的表情自动进表情库；同样不 await，不卡 ingest
     autoCollectSticker(kind, entry).catch((e) => log(`[sticker] 自动收藏失败：${e?.message ?? e}`));
+  }
+
+  /**
+   * message.command 提供者挨个问过去，谁认领谁处理（返回 { handled: true }）。
+   * 认领判断必须快：每个提供者限 2 秒，超时按"不归我管"算；慢活（下载、查网、发消息）
+   * 由提供者自己在后台做，不能卡住 ingest 热路径。提供者抛错只记日志，不连累别的提供者。
+   */
+  async function dispatchMessageCommand(kind, id, entry, text) {
+    const providers = skillManager.getCapabilityProviders('message.command');
+    if (!providers.length || !entry) return false;
+    const chatKey = `${kind}:${id}`;
+    const ctx = { kind, chatId: id, chatKey, text, entry, reply: entry.reply || null,
+      selfId: onebot.selfId || '', onebot, sender, store, log };
+    for (const p of providers) {
+      let timer;
+      try {
+        const r = await Promise.race([
+          Promise.resolve(p.fn(ctx)),
+          new Promise((resolve) => { timer = setTimeout(() => resolve(null), 2000); })
+        ]);
+        if (r?.handled === true) {
+          log(`[command] ${chatKey} #${entry.mid} 由 ${p.skillId} 处理`);
+          return true;
+        }
+      } catch (e) {
+        log(`[command] ${p.skillId} 出错：${e?.message ?? e}`);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    return false;
   }
 
   /** 用模型给表情写一句备注（画面 + 什么时候发），失败返回空串，由调用方兜底。 */
@@ -971,20 +1020,57 @@ export function createApp({ log = console.log } = {}) {
         { role: 'system', content: '你给QQ表情包写备注。只输出一行，不超过18个字：画面是什么，逗号，适合什么时候发。例：猫咪翻白眼，无语时' },
         { role: 'user', content: [{ type: 'text', text: '这个表情：' }, { type: 'image_url', image_url: { url: `data:${mime};base64,${buf.toString('base64')}` } }] }
       ],
-      maxTokens: 60
+      maxTokens: 1024   // 当前模型会先花掉一部分输出预算，给 60 直接 finish=length 返回空串
     });
     return String(r.message?.content || '').split('\n')[0].trim().slice(0, 20);
   }
 
+  /**
+   * 看图判断一张图能不能当表情包用，能的话给备注 + 情绪标签。失败/看不出返回 null。
+   * 表情目录是按标签挑的，没标签的条目模型基本不会选，所以这里一并打标签。
+   */
+  async function classifyReactionImage(url) {
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    const mime = detectMime(buf);
+    if (!/^image\//.test(mime || '')) return null;
+    const r = await chatCompletion({
+      messages: [
+        { role: 'system', content: '你判断一张群聊图片能不能当表情包/反应图用。表情包=表达情绪或态度的梗图、影视截图、动图、表情；截图（聊天记录、游戏界面、网页、文档）、普通照片、风景、商品图都不算。只输出一行 JSON：{"meme":true或false,"note":"不超过18字：画面是什么，逗号，适合什么时候发","tags":["2到5个情绪词，如 嫌弃 难绷 摆烂 坏笑 质疑 无语 得意 震惊 开心 委屈"]}' },
+        { role: 'user', content: [{ type: 'text', text: '这张图：' }, { type: 'image_url', image_url: { url: `data:${mime};base64,${buf.toString('base64')}` } }] }
+      ],
+      maxTokens: 1024   // 同上：120 不够，实测空串
+    });
+    const raw = String(r.message?.content || '');
+    try {
+      const j = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+      return {
+        meme: j.meme === true,
+        note: String(j.note || '').trim().slice(0, 20),
+        tags: (Array.isArray(j.tags) ? j.tags : []).map((t) => String(t).trim()).filter(Boolean).slice(0, 5)
+      };
+    } catch { return null; }
+  }
+
   async function autoCollectSticker(kind, entry) {
-    const from = (getConfig().sticker?.autoCollectFrom || []).map(String);
+    const cfgSticker = getConfig().sticker || {};
+    const from = (cfgSticker.autoCollectFrom || []).map(String);
     if (kind !== 'group' || !from.includes(String(entry?.senderId)) || entry?.mid == null) return;
+    // 带插件指令的消息里的图是拿去查的（/找鸡 /查番），不是在用表情
+    if (/(^|[^a-z0-9_/／])[/／][一-龥a-z]+/i.test(String(entry.text || ''))) return;
     for (const m of entry.media || []) {
-      if (m.kind !== 'image' || !/表情/.test(String(m.summary || ''))) continue;
-      let note = '';
-      try { note = await describeSticker(m.url); } catch { /* 描述失败照收，备注用兜底 */ }
-      const saved = await stickers.collect(entry.mid, { url: m.url, file: m.file, note: note || `${entry.senderName}常发的表情` });
-      log(`[sticker] 已自动收藏 ${entry.senderName} 的表情：${saved?.desc || saved?.id}`);
+      if (m.kind !== 'image') continue;
+      const isSticker = /表情/.test(String(m.summary || ''));
+      // 普通图片（本人发的梗图、截图）默认也看一眼：看图判定是表情包才收，截图/照片跳过。
+      // 之前只收 QQ「动画表情」，本人发的 59 张图只收进来 2 张，表情库一直长不大。
+      if (!isSticker && cfgSticker.autoCollectPictures === false) continue;
+      let info = null;
+      try { info = await classifyReactionImage(m.url); } catch { /* 看图失败 */ }
+      if (!isSticker && !info?.meme) continue;   // 普通图片必须判定为表情包才收
+      const saved = await stickers.collect(entry.mid, { url: m.url, file: m.file, note: info?.note || `${entry.senderName}常发的表情` });
+      if (saved?.id && info?.tags?.length) stickers.note(saved.id, { tags: info.tags });
+      log(`[sticker] 已自动收藏 ${entry.senderName} 的${isSticker ? '表情' : '图'}：${saved?.desc || saved?.id}${info?.tags?.length ? ` [${info.tags.join('/')}]` : ''}`);
     }
   }
 
@@ -1494,7 +1580,7 @@ export function createApp({ log = console.log } = {}) {
           //    CSP 浏览器取交集执行，只改一处等于没改**（本次 alicdn 加载失败即漏改此处）。
           headers['content-security-policy'] = [
             "default-src 'self'",
-            "script-src 'self' 'sha256-xBF5qExTuqfXHlYtKYaaldGJshQgQOr5zvcGHjbPL7w=' https://o.alicdn.com https://kondius.cn",
+            "script-src 'self' 'sha256-HJ5DwBIuT8nMl6SGSb24X9oSvsfDcsGPIkCgmk97V7I=' https://o.alicdn.com https://kondius.cn",
             "style-src 'self' 'unsafe-inline'",
             "img-src 'self' data: blob: http: https:",
             "media-src 'self' data: blob:",

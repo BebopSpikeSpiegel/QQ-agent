@@ -13,7 +13,7 @@
        官方要求必须动态加载 o.alicdn.com 的 SDK 并直连 aliyuncs 验签域，
        故 script-src / connect-src / frame-src / worker-src 增列对应来源，
        其余仍锁死在 'self'。 -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-AusRctWgAU9T2N4jaRWpaSsObfjDZwj+sO1AcdUK5/s=' https://o.alicdn.com https://kondius.cn; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http: https:; media-src 'self' data: blob:; connect-src 'self' https://kondius.cn https://*.aliyuncs.com https://*.alicdn.com; frame-src https://*.aliyuncs.com https://*.alicdn.com https://kondius.cn; worker-src 'self' blob: https://*.alicdn.com https://kondius.cn; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-HJ5DwBIuT8nMl6SGSb24X9oSvsfDcsGPIkCgmk97V7I=' https://o.alicdn.com https://kondius.cn; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http: https:; media-src 'self' data: blob:; connect-src 'self' https://kondius.cn https://*.aliyuncs.com https://*.alicdn.com; frame-src https://*.aliyuncs.com https://*.alicdn.com https://kondius.cn; worker-src 'self' blob: https://*.alicdn.com https://kondius.cn; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
   <link rel="stylesheet" href="/style.css" />
   <script>
     /* 主题预置：在样式生效前就定好 data-theme，避免首屏闪白/闪黑。

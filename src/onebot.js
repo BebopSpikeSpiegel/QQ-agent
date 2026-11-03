@@ -431,6 +431,18 @@ export function describeJsonCard(dataStr) {
     return parts.join('');
   }
 
+  // QQ 小程序分享（B站/小红书/知乎等手机端"分享到 QQ"）：detail_1.title 是小程序名，
+  // desc 才是内容标题，qqdocurl 是可直接打开的链接（B站给的是 b23.tv 短链）
+  const mini = meta.detail_1;
+  if (mini && (mini.desc || mini.qqdocurl)) {
+    const parts = [`[小程序·${String(mini.title || app || '分享').trim()}]`];
+    if (mini.desc) parts.push(` ${mini.desc}`);
+    const link = String(mini.qqdocurl || '').trim();
+    // 短链后面那串 share_* 追踪参数没用，还白占上下文
+    if (link) parts.push(` 链接: ${/^https?:\/\/b23\.tv\//i.test(link) ? link.split('?')[0] : link}`);
+    return parts.join('');
+  }
+
   const prompt = String(card.prompt || '').trim();
   if (prompt) return `[卡片消息·${app || '未知来源'}] ${prompt}`;
   return `[卡片消息·${app || '未知来源'}]`;
@@ -441,8 +453,10 @@ export function cardCoverFromData(dataStr) {
   try {
     const card = JSON.parse(String(dataStr ?? ''));
     const meta = card?.meta ?? {};
-    const pic = meta.news?.preview || meta.news?.image_url || meta.music?.picture || meta.miniapp?.iconUrl;
+    const pic = meta.news?.preview || meta.news?.image_url || meta.music?.picture || meta.detail_1?.preview || meta.miniapp?.iconUrl;
     if (typeof pic === 'string' && /^https?:\/\//.test(pic)) return pic;
+    // 小程序卡片的 preview 有时不带协议头（"qq.ugcimg.cn/v1/..."）
+    if (typeof pic === 'string' && /^(\/\/)?[a-z0-9.-]+\.[a-z]{2,}\//i.test(pic)) return `https://${pic.replace(/^\/\//, '')}`;
   } catch { /* 非法 JSON 无封面 */ }
   return null;
 }

@@ -167,10 +167,11 @@ function readManifest(dir) {
  *
  * 目录语义定义见 skills/manifest.js 的 DIR_KIND。
  */
-function lintKindPlacement(kind, { manifest, toolIds, providers, hooks }, log) {
+function lintKindPlacement(kind, { manifest, toolIds, providers, hooks, activate }, log) {
   if (!kind) return;
   const hasTools = (toolIds || []).length > 0;
-  const provides = Object.keys(providers || {}).length > 0 || Object.keys(hooks || {}).length > 0;
+  // 自带定时器、靠 activate 起副作用的插件（如 persona-learn）也算"有人调用"
+  const provides = Object.keys(providers || {}).length > 0 || Object.keys(hooks || {}).length > 0 || typeof activate === 'function';
 
   if (kind === 'skill' && !hasTools) {
     log(`[skill] ⚠️ ${manifest.id} 在 skills/（LLM 型）却没有注册任何工具：`

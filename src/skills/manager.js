@@ -36,6 +36,8 @@ const DEFAULT_HOOK_TIMEOUT_MS = 5000;
  *   · media.download —— 按平台拆分实现：B站插件、抖音插件各提供一个，
  *     核心把消息里的链接挨个问过去，谁认领谁处理。新增平台 = 再加一个提供者，
  *     不需要改核心，所以这里必须允许多个。
+ *   · message.command —— 每个指令插件认领自己的指令（/查番、/xxx），核心挨个问过去，
+ *     谁返回 { handled: true } 谁处理；新增指令 = 再加一个提供者。
  * 列出它们，是为了让"能力名冲突"检查既严格又不误报。
  */
 export const MULTI_PROVIDER_CAPABILITIES = new Set([
@@ -44,7 +46,8 @@ export const MULTI_PROVIDER_CAPABILITIES = new Set([
   'llm.usage',
   'llm.retry-advisor',
   'tool.guard',
-  'media.download'
+  'media.download',
+  'message.command'
 ]);
 
 export class SkillManager {

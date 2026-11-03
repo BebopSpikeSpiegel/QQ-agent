@@ -228,6 +228,14 @@ export const hooks = {
 | `message.speaker-format` | `prompt.js` | `{ message, notes, selfLabel }` | 字符串标签 |
 | `message.inline-at-normalize` | `onebot.js` | `{ text, members:[{userId,nickname}], atUserId }` | `string` 或 `null`（`null` = 不改） |
 | `message.owner-check` | `orchestrator.js` | `{ triggerEntries, kind, selfId, persona }` | `{ persona, rules }` |
+| `message.command` | `app.js`（入站每条消息） | `{ kind, chatId, chatKey, text, entry, reply, selfId, onebot, sender, store, log }` | `{ handled: true }` 认领 / `null` 不归我管 |
+
+`message.command` 是**多提供者**能力，用来做「群友发固定指令 → 插件按死规则处理」（如引用图发 `/查番`）：
+
+- 消息照常留档；某个提供者返回 `{ handled: true }` 后，核心把这条标为已读、**不再交给模型**，所以不会插件回一遍、机器人又回一遍。
+- `text` 是渲染后的文本（引用块渲染成 `[引用 … #mid：…]` 前缀）；`entry.media` 是本条的图，`reply.media` 是被引用那条的图（`reply.resolved === true` 时可信）。
+- 认领判断限 **2 秒**，超时按"不归我管"算：下载、联网、发消息这类慢活自己放后台跑（不要 `await`），发消息一律用传进来的 `sender`。
+- 参考实现：`plugins/anime-source/`。
 
 ### 4.2 媒体
 

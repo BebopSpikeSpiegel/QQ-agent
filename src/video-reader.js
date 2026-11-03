@@ -232,7 +232,7 @@ export class VideoReader {
   /** 说明文案：让模型知道它拿到的是什么形式的内容。 */
   #buildNote(out, { hasFile }) {
     if (!hasFile) {
-      return '无法获取视频文件（OneBot 无缓存且 url 下载失败）。只能告诉你这条消息带了一个视频。';
+      return '拿不到这个视频文件：多半是发得太早，QQ 的视频链接已经过期（大约一小时失效），本地也没存下。看不了画面，别编内容；想看就让对方重发一下。';
     }
     const bits = [];
     if (out.durationSec) bits.push(`时长 ${out.durationSec.toFixed(1)} 秒`);
@@ -307,6 +307,30 @@ export class VideoReader {
     } finally {
       try { if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut); } catch { /* ignore */ }
     }
+  }
+
+  /**
+   * 收到视频就先下载到本地缓存，返回文件路径（失败返回 null）。
+   * QQ 给的视频下载链接大约一小时就过期（"download url has expired"），
+   * 群友引用一条早些时候的视频让机器人看时，链接早已失效、协议端也不会重签，
+   * 所以只能在链接还新鲜时就落地。顺手清掉超过 3 天的旧缓存。
+   */
+  async prefetch(media) {
+    this.#cleanCache(3 * 24 * 3600 * 1000);
+    if (media?.path && fs.existsSync(String(media.path))) return String(media.path);
+    if (!/^https?:\/\//i.test(String(media?.url || ''))) return null;
+    return this.#download(String(media.url), 180000);
+  }
+
+  #cleanCache(maxAgeMs) {
+    try {
+      const dir = videoCacheDir();
+      const now = Date.now();
+      for (const f of fs.readdirSync(dir)) {
+        const p = path.join(dir, f);
+        try { if (now - fs.statSync(p).mtimeMs > maxAgeMs) fs.unlinkSync(p); } catch { /* 正在用或已删 */ }
+      }
+    } catch { /* 目录还没建 */ }
   }
 
   /** 把视频落地为本地文件路径（OneBot 缓存 → 下载 url）。 */
